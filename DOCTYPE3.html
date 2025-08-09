@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS 위치 추적기 – 3D + 지오펜스(효과/사운드 옵션)</title>
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);}    
+    .container { height: 100vh; display: flex; flex-direction: column; }
+
+    .header { background: rgba(255,255,255,0.95); padding: 14px 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); backdrop-filter: blur(10px); display: grid; gap: 10px; }
+    .title { font-weight: 700; font-size: 20px; color: #222 }
+
+    .toolbar { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .status { padding: 8px 14px; border-radius: 20px; font-size: 14px; font-weight: 600; display: inline-flex; gap: 8px; align-items: center; justify-self: start; }
+    .status.active { background: #4CAF50; color: #fff; }
+    .status.inactive { background: #f44336; color: #fff; }
+    .status.loading { background: #ff9800; color: #fff; }
+    .status.info { background: #607d8b; color: #fff; }
+
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-self: end; }
+    .btn { padding: 9px 16px; border: 0; border-radius: 24px; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #2196F3; color: white; }
+    .btn-primary:hover { background: #1976D2; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #545b62; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+
+    .geofence-bar { display: grid; grid-template-columns: 1.4fr 0.8fr auto; gap: 8px; }
+    .input { height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid #d0d4d9; outline: none; }
+
+    /* ===== 효과 오버레이 ===== */
+    #fx-overlay { pointer-events: none; position: absolute; inset: 0; z-index: 20; opacity: 0; }
+    .fx-cross { animation: fxPulse var(--fx-duration, 1100ms) ease-out; }
+
+    :root { --fx-color: #FF9800; /* 기본 오렌지 */ --fx-ringW: 8px; }
+
+    @keyframes fxPulse {
+      0% { opacity: 0; backdrop-filter: none; }
+      10% { opacity: .75; backdrop-filter: saturate(60%) contrast(120%) brightness(105%); box-shadow: inset 0 0 0 var(--fx-ringW) var(--fx-color); }
+      40% { opacity: .45; box-shadow: inset 0 0 0 calc(var(--fx-ringW)/2) var(--fx-color); }
+      70% { opacity: .25; }
+      100% { opacity: 0; }
+    }
+
+    #fx-ring { position: absolute; inset: 0; border-radius: 20px; }
+
+    /* 흔들림 강도 3단계 */
+    .shakeL { animation: shakeL 240ms ease-in-out; }
+    .shakeM { animation: shakeM 300ms ease-in-out; }
+    .shakeH { animation: shakeH 380ms ease-in-out; }
+
+    @keyframes shakeL { 0%{ transform: translate(0,0)} 25%{ transform: translate(1.2px,-1.2px)} 50%{ transform: translate(-1.2px,1.2px)} 75%{ transform: translate(1.2px,0.6px)} 100%{ transform: translate(0,0)} }
+    @keyframes shakeM { 0%{ transform: translate(0,0)} 25%{ transform: translate(2px,-2px)} 50%{ transform: translate(-2px,2px)} 75%{ transform: translate(2px,1px)} 100%{ transform: translate(0,0)} }
+    @keyframes shakeH { 0%{ transform: translate(0,0)} 20%{ transform: translate(3px,-3px)} 40%{ transform: translate(-3px,3px)} 60%{ transform: translate(3px,-2px)} 80%{ transform: translate(-3px,2px)} 100%{ transform: translate(0,0)} }
+
+    .map-wrap { position: relative; flex: 1; }
+    #map { position: absolute; inset: 0; }
+
+    .info-panel { position: absolute; left: 16px; right: 16px; bottom: 16px; background: rgba(255,255,255,0.95); border-radius: 14px; padding: 14px 16px; backdrop-filter: blur(8px); box-shadow: 0 5px 25px rgba(0,0,0,0.2); z-index: 10; }
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .info-item { text-align: center; }
+    .info-label { font-size: 12px; color: #666; margin-bottom: 4px; }
+    .info-value { font-size: 16px; font-weight: 700; color: #222; }
+
+    .loading-spinner { width: 18px; height: 18px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg);} }
+
+    @media (max-width: 768px){ .header{ padding: 10px 12px } .title{ font-size: 18px } .geofence-bar{ grid-template-columns: 1fr 0.8fr auto } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title">📍 GPS 위치 추적기 – 3D + 지오펜스</div>
+
+      <div class="toolbar">
+        <div class="status inactive" id="status">
+          <div class="loading-spinner" id="spinner" style="display:none"></div>
+          <span id="statusText">GPS 대기 중...</span>
+        </div>
+        <div class="controls">
+          <button class="btn btn-primary" id="startBtn">추적 시작</button>
+          <button class="btn btn-secondary" id="stopBtn" disabled>추적 중지</button>
+        </div>
+      </div>
+
+      <!-- 지오펜스 입력 바 -->
+      <div class="geofence-bar">
+        <input id="addrInput" class="input" placeholder="주소를 입력하세요 (예: 서울시청)" />
+        <input id="radiusInput" class="input" type="number" min="10" step="5" placeholder="반경 (m)" />
+        <button class="btn btn-primary" id="setZoneBtn">영역 설정</button>
+      </div>
+
+      <!-- 효과/옵션 바 -->
+      <div class="geofence-bar" style="margin-top:6px">
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:8px; align-items:center;">
+          <label style="display:flex; gap:6px; align-items:center;">
+            <span style="font-size:12px; color:#555; width:48px;">강도</span>
+            <select id="intensity" class="input" style="height:34px">
+              <option value="L">낮음</option>
+              <option value="M" selected>보통</option>
+              <option value="H">강함</option>
+            </select>
+          </label>
+          <label style="display:flex; gap:6px; align-items:center;">
+            <input id="optPulse" type="checkbox" checked /> <span style="font-size:12px; color:#555;">테두리 펄스</span>
+          </label>
+          <label style="display:flex; gap:6px; align-items:center;">
+            <input id="optShake" type="checkbox" checked /> <span style="font-size:12px; color:#555;">흔들림</span>
+          </label>
+          <label style="display:flex; gap:6px; align-items:center;">
+            <input id="optSound" type="checkbox" checked /> <span style="font-size:12px; color:#555;">효과음</span>
+            <input id="vol" class="input" type="range" min="0" max="100" value="70" style="height:34px" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div id="fx-overlay"><div id="fx-ring"></div></div>
+
+      <div class="info-panel">
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">위도</div><div class="info-value" id="latitude">--</div></div>
+          <div class="info-item"><div class="info-label">경도</div><div class="info-value" id="longitude">--</div></div>
+          <div class="info-item"><div class="info-label">정확도</div><div class="info-value" id="accuracy">-- m</div></div>
+          <div class="info-item"><div class="info-label">마지막 업데이트</div><div class="info-value" id="lastUpdate">--</div></div>
+          <div class="info-item"><div class="info-label">지오펜스 상태</div><div class="info-value" id="fenceState">미설정</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // MapTiler API 키 (지오코딩/지형용). 없으면 데모 스타일 사용 & 지오코딩 비활성화
+    const MAPTILER_KEY = 'gpg8gRhDhCtaNPgCWYV5';
+
+    class GPSTracker3D {
+      audio = { ctx:null, gain:null };
+      constructor(){
+        this.map = null; this.isTracking = false; this.watchId = null;
+        this.pathCoords = []; this.positionMarker = null;
+        this.pathSourceId = 'path-source'; this.pathLayerId = 'path-layer';
+        this.accuracySourceId = 'accuracy-source'; this.accuracyLayerId = 'accuracy-layer';
+        this.geofence = null; this.lastInside = null;
+
+        this.initMap(); this.bindEvents(); this.checkGeolocationSupport(); this.installTinyTests();
+      }
+
+      initMap(){
+        const styleUrl = MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_MAPTILER_KEY_HERE'
+          ? `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`
+          : 'https://demotiles.maplibre.org/style.json';
+
+        this.map = new maplibregl.Map({ container:'map', style: styleUrl, center:[126.9780,37.5665], zoom:13, pitch:60, bearing:-20, antialias:true });
+        this.map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+        this.map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }));
+
+        this.map.on('load', () => {
+          if(MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_MAPTILER_KEY_HERE'){
+            this.map.addSource('terrain', { type:'raster-dem', url:`https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=${MAPTILER_KEY}`, tileSize:256 });
+            this.map.setTerrain({ source:'terrain', exaggeration: 1.2 });
+            this.map.addLayer({ id:'sky', type:'sky', paint:{ 'sky-type':'atmosphere', 'sky-opacity':1 } });
+          }
+          this.map.addSource(this.pathSourceId, { type:'geojson', data:{ type:'FeatureCollection', features:[] }});
+          this.map.addLayer({ id:this.pathLayerId, type:'line', source:this.pathSourceId, paint:{ 'line-width':4, 'line-opacity':0.85, 'line-color':'#FF5722' }});
+          this.map.addSource(this.accuracySourceId, { type:'geojson', data:{ type:'FeatureCollection', features:[] }});
+          this.map.addLayer({ id:this.accuracyLayerId, type:'fill', source:this.accuracySourceId, paint:{ 'fill-color':'#2196F3', 'fill-opacity':0.12 }});
+          this.positionMarker = new maplibregl.Marker({ color:'#2E7D32' });
+        });
+      }
+
+      bindEvents(){
+        document.getElementById('startBtn').addEventListener('click', () => this.start());
+        document.getElementById('stopBtn').addEventListener('click', () => this.stop());
+        document.getElementById('setZoneBtn').addEventListener('click', () => this.setZoneFromInputs());
+      }
+
+      checkGeolocationSupport(){
+        if(!('geolocation' in navigator)){
+          this.updateStatus('Geolocation이 지원되지 않습니다', 'inactive');
+          document.getElementById('startBtn').disabled = true;
+        }
+      }
+
+      start(){
+        if(this.isTracking) return;
+        this.updateStatus('위치 검색 중...', 'loading');
+        document.getElementById('spinner').style.display = 'inline-block';
+        const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
+        this.watchId = navigator.geolocation.watchPosition((pos)=>this.onSuccess(pos),(err)=>this.onError(err),options);
+        this.isTracking = true; document.getElementById('startBtn').disabled = true; document.getElementById('stopBtn').disabled = false;
+      }
+
+      stop(){
+        if(!this.isTracking) return;
+        if(this.watchId !== null){ navigator.geolocation.clearWatch(this.watchId); this.watchId = null; }
+        this.isTracking = false; this.updateStatus('추적 중지됨', 'inactive');
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('startBtn').disabled = false; document.getElementById('stopBtn').disabled = true;
+      }
+
+      onSuccess(position){
+        const { latitude, longitude, accuracy } = position.coords; const lngLat = [longitude, latitude];
+        if(this.pathCoords.length === 0){ this.map.jumpTo({ center: lngLat, zoom: 16, pitch: 60, bearing: -20 }); }
+        this.pathCoords.push(lngLat); this.updatePath();
+        const circlePoly = this.circleToPolygon(lngLat, accuracy, 64);
+        const accSrc = this.map.getSource(this.accuracySourceId); if(accSrc) accSrc.setData({ type:'FeatureCollection', features:[circlePoly]});
+        if(this.positionMarker) this.positionMarker.setLngLat(lngLat).addTo(this.map);
+        this.updateInfo(latitude, longitude, accuracy); this.updateStatus('추적 중', 'active'); document.getElementById('spinner').style.display = 'none';
+        this.checkGeofenceCross(lngLat);
+      }
+
+      onError(error){
+        const messages = {1:'위치 권한이 거부되었습니다',2:'위치 정보를 사용할 수 없습니다',3:'위치 검색 시간 초과'};
+        this.updateStatus(messages[error.code] || '알 수 없는 오류 발생', 'inactive');
+        document.getElementById('spinner').style.display = 'none'; this.stop();
+      }
+
+      updateInfo(lat, lng, acc){
+        document.getElementById('latitude').textContent = lat.toFixed(6);
+        document.getElementById('longitude').textContent = lng.toFixed(6);
+        document.getElementById('accuracy').textContent = Math.round(acc) + ' m';
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+      }
+
+      updateStatus(text, type){ const el = document.getElementById('status'); const txt = document.getElementById('statusText'); el.className = `status ${type}`; txt.textContent = text; }
+
+      updatePath(){
+        const pathFC = { type:'FeatureCollection', features:[{ type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates:this.pathCoords }}] };
+        const pathSrc = this.map.getSource(this.pathSourceId); if(pathSrc) pathSrc.setData(pathFC);
+      }
+
+      async setZoneFromInputs(){
+        const addr = document.getElementById('addrInput').value.trim();
+        const radius = parseFloat(document.getElementById('radiusInput').value);
+        if(!addr || !radius || radius <= 0){ this.flashInfo('주소와 유효한 반경(m)을 입력하세요.'); return; }
+        try{
+          const center = await this.geocode(addr);
+          if(!center){ this.flashInfo('지오코딩 실패: 키를 확인하거나 다른 주소로 시도하세요.'); return; }
+          this.setGeofence(center, radius); this.map.easeTo({ center, zoom: Math.max(15, this.map.getZoom()) });
+        }catch(e){ this.flashInfo('지오펜스 설정 오류: ' + e.message); }
+      }
+
+      setGeofence(centerLngLat, radiusMeters){
+        this.geofence = { center: centerLngLat, radius: radiusMeters };
+        const fenceGeo = this.circleToPolygon(centerLngLat, radiusMeters, 128);
+        if(this.map.getSource('fence-src')){ this.map.getSource('fence-src').setData({ type:'FeatureCollection', features:[fenceGeo] }); }
+        else{
+          this.map.addSource('fence-src', { type:'geojson', data:{ type:'FeatureCollection', features:[fenceGeo] } });
+          this.map.addLayer({ id:'fence-fill', type:'fill', source:'fence-src', paint:{ 'fill-color':'#00bcd4', 'fill-opacity':0.08 }});
+          this.map.addLayer({ id:'fence-line', type:'line', source:'fence-src', paint:{ 'line-color':'#00bcd4', 'line-width':3, 'line-dasharray':[2,1] }});
+        }
+        document.getElementById('fenceState').textContent = '설정됨 (반경 ' + Math.round(radiusMeters) + ' m)';
+        this.flashInfo('지오펜스를 설정했습니다.');
+      }
+
+      checkGeofenceCross(lngLat){
+        if(!this.geofence) return;
+        const d = this.distanceMeters(lngLat, this.geofence.center);
+        const inside = d <= this.geofence.radius;
+        if(this.lastInside === null){ this.lastInside = inside; return; }
+        if(inside !== this.lastInside){ this.lastInside = inside; this.playCrossEffect(inside); document.getElementById('fenceState').textContent = inside ? '영역 내부' : '영역 외부'; }
+      }
+
+      playCrossEffect(inside){
+        const fx = document.getElementById('fx-overlay');
+        const ring = document.getElementById('fx-ring');
+        const usePulse = document.getElementById('optPulse').checked;
+        const useShake = document.getElementById('optShake').checked;
+        const level = document.getElementById('intensity').value; // L/M/H
+
+        const color = inside ? '#FF9800' : '#ADD8E6'; // 진입=오렌지, 이탈=연청색
+        document.documentElement.style.setProperty('--fx-color', color);
+        const ringW = level==='L' ? '6px' : level==='H' ? '12px' : '8px';
+        const duration = level==='L' ? 800 : level==='H' ? 1400 : 1100;
+        document.documentElement.style.setProperty('--fx-ringW', ringW);
+        fx.style.setProperty('--fx-duration', duration+'ms');
+
+        fx.classList.remove('fx-cross'); ring.classList.remove('shakeL','shakeM','shakeH'); void fx.offsetWidth;
+        if(usePulse) fx.classList.add('fx-cross');
+        if(useShake) ring.classList.add(level==='L' ? 'shakeL' : level==='H' ? 'shakeH' : 'shakeM');
+        if(document.getElementById('optSound').checked){ this.playSound(inside); }
+        this.updateStatus(inside ? '지오펜스 진입' : '지오펜스 이탈', inside ? 'active' : 'inactive');
+      }
+
+      flashInfo(msg){ this.updateStatus(msg, 'info'); setTimeout(()=> this.updateStatus('대기/추적 상태는 상단을 확인하세요', 'info'), 2500); }
+
+      distanceMeters(a, b){ const toRad=(x)=>x*Math.PI/180; const [lng1,lat1]=a,[lng2,lat2]=b; const R=6378137; const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1); const sa=Math.sin(dLat/2), sb=Math.sin(dLng/2); const c=2*Math.asin(Math.sqrt(sa*sa+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sb*sb)); return R*c; }
+
+      circleToPolygon(center, radiusMeters, steps = 64){ const [lng,lat]=center; const coords=[]; const R=6378137; for(let i=0;i<=steps;i++){ const theta=(i/steps)*2*Math.PI; const dx=(radiusMeters*Math.cos(theta))/(R*Math.cos(lat*Math.PI/180)); const dy=(radiusMeters*Math.sin(theta))/R; coords.push([ lng + (dx*180/Math.PI), lat + (dy*180/Math.PI) ]); } return { type:'Feature', properties:{}, geometry:{ type:'Polygon', coordinates:[coords] } }; }
+
+      async geocode(query){ if(!(MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_MAPTILER_KEY_HERE')) return null; const url=`https://api.maptiler.com/geocoding/${encodeURIComponent(query)}.json?key=${MAPTILER_KEY}`; const res=await fetch(url); if(!res.ok) throw new Error('지오코딩 HTTP ' + res.status); const data=await res.json(); if(!data.features || data.features.length===0) return null; const [lng,lat]=data.features[0].center; return [lng,lat]; }
+
+      installTinyTests(){ try{ console.assert(Math.abs(this.distanceMeters([0,0],[0,0])) < 1e-6, 'distance self'); const d1=Math.round(this.distanceMeters([126.9780,37.5665],[126.9780,37.5755])); console.assert(d1>900 && d1<1100, 'distance ~1km check'); const poly=this.circleToPolygon([126.9780,37.5665],100,16); console.assert(poly.geometry.coordinates[0].length===17,'circle steps closes loop'); console.log('[SELFTEST] ok'); }catch(e){ console.warn('[SELFTEST] failed', e); } }
+
+      ensureAudio(){ if(this.audio.ctx) return; const C=window.AudioContext||window.webkitAudioContext; if(!C) return; const ctx=new C(); const gain=ctx.createGain(); gain.gain.value=(document.getElementById('vol')?.value||70)/100; gain.connect(ctx.destination); this.audio={ctx,gain}; if(ctx.state==='suspended'){ ctx.resume().catch(()=>{}); } }
+
+      playSound(inside){ try{ this.ensureAudio(); const {ctx,gain}=this.audio; if(!ctx) return; const v=(document.getElementById('vol').value|0)/100; gain.gain.value=v; const o=ctx.createOscillator(); const g=ctx.createGain(); g.gain.value=0.0001; o.connect(g); g.connect(gain); o.type='sine'; o.frequency.setValueAtTime(inside?880:440, ctx.currentTime); const t0=ctx.currentTime; const t1=t0+0.18; const t2=t1+0.12; g.gain.exponentialRampToValueAtTime(0.3, t1); g.gain.exponentialRampToValueAtTime(0.0001, t2); o.start(t0); o.stop(t2+0.02); }catch(e){} }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => new GPSTracker3D());
+  </script>
+</body>
+</html>
