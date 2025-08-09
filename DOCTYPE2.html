@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS 위치 추적기 – 3D</title>
+  <!-- MapLibre GL JS -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .container { height: 100vh; display: flex; flex-direction: column; }
+
+    .header {
+      background: rgba(255,255,255,0.95);
+      padding: 14px 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      backdrop-filter: blur(10px);
+      display: grid; gap: 8px;
+    }
+    .title { font-weight: 700; font-size: 20px; color: #222 }
+
+    .status-bar { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .status { padding: 8px 14px; border-radius: 20px; font-size: 14px; font-weight: 600; display: inline-flex; gap: 8px; align-items: center; }
+    .status.active { background: #4CAF50; color: #fff; }
+    .status.inactive { background: #f44336; color: #fff; }
+    .status.loading { background: #ff9800; color: #fff; }
+
+    .controls { display: flex; gap: 8px; }
+    .btn { padding: 9px 16px; border: 0; border-radius: 24px; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #2196F3; color: white; }
+    .btn-primary:hover { background: #1976D2; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #545b62; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+
+    .map-wrap { position: relative; flex: 1; }
+    #map { position: absolute; inset: 0; }
+
+    .info-panel {
+      position: absolute;
+      left: 16px; right: 16px; bottom: 16px;
+      background: rgba(255,255,255,0.95);
+      border-radius: 14px; padding: 14px 16px; backdrop-filter: blur(8px);
+      box-shadow: 0 5px 25px rgba(0,0,0,0.2);
+      z-index: 10;
+    }
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .info-item { text-align: center; }
+    .info-label { font-size: 12px; color: #666; margin-bottom: 4px; }
+    .info-value { font-size: 16px; font-weight: 700; color: #222; }
+
+    .loading-spinner { width: 18px; height: 18px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg);} }
+
+    @media (max-width: 768px){ .header{ padding: 10px 12px } .title{ font-size: 18px } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title">📍 GPS 위치 추적기 – 3D</div>
+      <div class="status-bar">
+        <div class="status inactive" id="status">
+          <div class="loading-spinner" id="spinner" style="display:none"></div>
+          <span id="statusText">GPS 대기 중...</span>
+        </div>
+        <div class="controls">
+          <button class="btn btn-primary" id="startBtn">추적 시작</button>
+          <button class="btn btn-secondary" id="stopBtn" disabled>추적 중지</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div class="info-panel">
+        <div class="info-grid">
+          <div class="info-item">
+            <div class="info-label">위도</div>
+            <div class="info-value" id="latitude">--</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">경도</div>
+            <div class="info-value" id="longitude">--</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">정확도</div>
+            <div class="info-value" id="accuracy">-- m</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">마지막 업데이트</div>
+            <div class="info-value" id="lastUpdate">--</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // === 설정 ===
+    // MapTiler API 키가 필요합니다. https://www.maptiler.com 로 발급받아 아래에 입력하세요.
+    const MAPTILER_KEY = 'gpg8gRhDhCtaNPgCWYV5';
+
+    class GPSTracker3D {
+      constructor(){
+        this.map = null;
+        this.isTracking = false;
+        this.watchId = null;
+        this.pathCoords = [];
+        this.positionMarkerId = 'pos-marker';
+        this.pathSourceId = 'path-source';
+        this.pathLayerId = 'path-layer';
+        this.accuracySourceId = 'accuracy-source';
+        this.accuracyLayerId = 'accuracy-layer';
+        this.initMap();
+        this.bindEvents();
+        this.checkGeolocationSupport();
+      }
+
+      initMap(){
+        this.map = new maplibregl.Map({
+          container: 'map',
+          style: `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`,
+          center: [126.9780, 37.5665], // 서울시청
+          zoom: 13,
+          pitch: 60,
+          bearing: -20,
+          antialias: true
+        });
+
+        // 네비게이션 컨트롤
+        this.map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+        this.map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }));
+
+        this.map.on('load', () => {
+          // 지형(DEM) 소스 + Terrain 적용
+          this.map.addSource('terrain', {
+            type: 'raster-dem',
+            url: `https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=${MAPTILER_KEY}`,
+            tileSize: 256
+          });
+          this.map.setTerrain({ source: 'terrain', exaggeration: 1.2 });
+
+          // 하늘 배경
+          this.map.addLayer({
+            id: 'sky',
+            type: 'sky',
+            paint: {
+              'sky-type': 'atmosphere',
+              'sky-opacity': 1
+            }
+          });
+
+          // 3D 건물 (벡터 타일의 building 레이어 활용)
+          // MapTiler 스타일은 기본적으로 openmaptiles 소스 이름을 사용합니다.
+          this.map.addLayer({
+            id: '3d-buildings',
+            source: 'openmaptiles',
+            'source-layer': 'building',
+            type: 'fill-extrusion',
+            minzoom: 12,
+            paint: {
+              'fill-extrusion-color': ['get', 'color'],
+              'fill-extrusion-height': [
+                'case',
+                ['has', 'render_height'], ['get', 'render_height'],
+                ['has', 'height'], ['get', 'height'],
+                10
+              ],
+              'fill-extrusion-opacity': 0.9
+            }
+          }, 'waterway');
+
+          // 경로용 GeoJSON 소스/레이어
+          this.map.addSource(this.pathSourceId, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+          });
+          this.map.addLayer({
+            id: this.pathLayerId,
+            type: 'line',
+            source: this.pathSourceId,
+            paint: {
+              'line-width': 4,
+              'line-opacity': 0.8,
+              'line-color': '#FF5722'
+            }
+          });
+
+          // 정확도 원을 위한 소스/레이어
+          this.map.addSource(this.accuracySourceId, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+          });
+          this.map.addLayer({
+            id: this.accuracyLayerId,
+            type: 'fill',
+            source: this.accuracySourceId,
+            paint: {
+              'fill-color': '#2196F3',
+              'fill-opacity': 0.12
+            }
+          });
+
+          // 현재 위치 마커 (MapLibre Marker 사용)
+          this.positionMarker = new maplibregl.Marker({ color: '#2E7D32' });
+        });
+      }
+
+      bindEvents(){
+        document.getElementById('startBtn').addEventListener('click', () => this.start());
+        document.getElementById('stopBtn').addEventListener('click', () => this.stop());
+      }
+
+      checkGeolocationSupport(){
+        if(!('geolocation' in navigator)){
+          this.updateStatus('Geolocation이 지원되지 않습니다', 'inactive');
+          document.getElementById('startBtn').disabled = true;
+        }
+      }
+
+      start(){
+        if(this.isTracking) return;
+        this.updateStatus('위치 검색 중...', 'loading');
+        document.getElementById('spinner').style.display = 'inline-block';
+        const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
+        this.watchId = navigator.geolocation.watchPosition(
+          (pos) => this.onSuccess(pos),
+          (err) => this.onError(err),
+          options
+        );
+        this.isTracking = true;
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+      }
+
+      stop(){
+        if(!this.isTracking) return;
+        if(this.watchId !== null){ navigator.geolocation.clearWatch(this.watchId); this.watchId = null; }
+        this.isTracking = false;
+        this.updateStatus('추적 중지됨', 'inactive');
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
+      }
+
+      onSuccess(position){
+        const { latitude, longitude, accuracy } = position.coords;
+        const lngLat = [longitude, latitude];
+
+        // 지도 첫 진입 시 뷰 조정
+        if(this.pathCoords.length === 0){
+          this.map.jumpTo({ center: lngLat, zoom: 16, pitch: 60, bearing: -20 });
+        }
+
+        // 경로 업데이트
+        this.pathCoords.push(lngLat);
+        const pathFC = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {},
+              geometry: { type: 'LineString', coordinates: this.pathCoords }
+            }
+          ]
+        };
+        const pathSrc = this.map.getSource(this.pathSourceId);
+        if(pathSrc) pathSrc.setData(pathFC);
+
+        // 정확도 원(대략적 원 폴리곤) 업데이트
+        const circlePoly = this.circleToPolygon(lngLat, accuracy, 64);
+        const accFC = { type: 'FeatureCollection', features: [circlePoly] };
+        const accSrc = this.map.getSource(this.accuracySourceId);
+        if(accSrc) accSrc.setData(accFC);
+
+        // 현재 위치 마커 업데이트
+        if(this.positionMarker) this.positionMarker.setLngLat(lngLat).addTo(this.map);
+
+        // UI 업데이트
+        this.updateInfo(latitude, longitude, accuracy);
+        this.updateStatus('추적 중', 'active');
+        document.getElementById('spinner').style.display = 'none';
+      }
+
+      onError(error){
+        const messages = {
+          1: '위치 권한이 거부되었습니다',
+          2: '위치 정보를 사용할 수 없습니다',
+          3: '위치 검색 시간 초과'
+        };
+        this.updateStatus(messages[error.code] || '알 수 없는 오류 발생', 'inactive');
+        document.getElementById('spinner').style.display = 'none';
+        this.stop();
+      }
+
+      updateInfo(lat, lng, acc){
+        document.getElementById('latitude').textContent = lat.toFixed(6);
+        document.getElementById('longitude').textContent = lng.toFixed(6);
+        document.getElementById('accuracy').textContent = Math.round(acc) + ' m';
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+      }
+
+      updateStatus(text, type){
+        const el = document.getElementById('status');
+        const txt = document.getElementById('statusText');
+        el.className = `status ${type}`;
+        txt.textContent = text;
+      }
+
+      // 경위도( lng,lat )와 미터 단위 반경으로 원 형태의 폴리곤 생성
+      circleToPolygon(center, radiusMeters, steps = 64){
+        const [lng, lat] = center;
+        const coords = [];
+        const R = 6378137; // 지구 반경(m)
+        for(let i=0;i<=steps;i++){
+          const theta = (i / steps) * 2 * Math.PI;
+          const dx = (radiusMeters * Math.cos(theta)) / (R * Math.cos(lat * Math.PI/180));
+          const dy = (radiusMeters * Math.sin(theta)) / R;
+          const lngOffset = dx * 180 / Math.PI;
+          const latOffset = dy * 180 / Math.PI;
+          coords.push([lng + lngOffset, lat + latOffset]);
+        }
+        return {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [coords] }
+        };
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => new GPSTracker3D());
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS 위치 추적기 – 3D</title>
+  <!-- MapLibre GL JS -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .container { height: 100vh; display: flex; flex-direction: column; }
+
+    .header {
+      background: rgba(255,255,255,0.95);
+      padding: 14px 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      backdrop-filter: blur(10px);
+      display: grid; gap: 8px;
+    }
+    .title { font-weight: 700; font-size: 20px; color: #222 }
+
+    .status-bar { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .status { padding: 8px 14px; border-radius: 20px; font-size: 14px; font-weight: 600; display: inline-flex; gap: 8px; align-items: center; }
+    .status.active { background: #4CAF50; color: #fff; }
+    .status.inactive { background: #f44336; color: #fff; }
+    .status.loading { background: #ff9800; color: #fff; }
+
+    .controls { display: flex; gap: 8px; }
+    .btn { padding: 9px 16px; border: 0; border-radius: 24px; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #2196F3; color: white; }
+    .btn-primary:hover { background: #1976D2; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #545b62; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+
+    .map-wrap { position: relative; flex: 1; }
+    #map { position: absolute; inset: 0; }
+
+    .info-panel {
+      position: absolute;
+      left: 16px; right: 16px; bottom: 16px;
+      background: rgba(255,255,255,0.95);
+      border-radius: 14px; padding: 14px 16px; backdrop-filter: blur(8px);
+      box-shadow: 0 5px 25px rgba(0,0,0,0.2);
+      z-index: 10;
+    }
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .info-item { text-align: center; }
+    .info-label { font-size: 12px; color: #666; margin-bottom: 4px; }
+    .info-value { font-size: 16px; font-weight: 700; color: #222; }
+
+    .loading-spinner { width: 18px; height: 18px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg);} }
+
+    @media (max-width: 768px){ .header{ padding: 10px 12px } .title{ font-size: 18px } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title">📍 GPS 위치 추적기 – 3D</div>
+      <div class="status-bar">
+        <div class="status inactive" id="status">
+          <div class="loading-spinner" id="spinner" style="display:none"></div>
+          <span id="statusText">GPS 대기 중...</span>
+        </div>
+        <div class="controls">
+          <button class="btn btn-primary" id="startBtn">추적 시작</button>
+          <button class="btn btn-secondary" id="stopBtn" disabled>추적 중지</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div class="info-panel">
+        <div class="info-grid">
+          <div class="info-item">
+            <div class="info-label">위도</div>
+            <div class="info-value" id="latitude">--</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">경도</div>
+            <div class="info-value" id="longitude">--</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">정확도</div>
+            <div class="info-value" id="accuracy">-- m</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">마지막 업데이트</div>
+            <div class="info-value" id="lastUpdate">--</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // === 설정 ===
+    // MapTiler API 키가 필요합니다. https://www.maptiler.com 로 발급받아 아래에 입력하세요.
+    const MAPTILER_KEY = 'YOUR_MAPTILER_KEY_HERE';
+
+    class GPSTracker3D {
+      constructor(){
+        this.map = null;
+        this.isTracking = false;
+        this.watchId = null;
+        this.pathCoords = [];
+        this.positionMarkerId = 'pos-marker';
+        this.pathSourceId = 'path-source';
+        this.pathLayerId = 'path-layer';
+        this.accuracySourceId = 'accuracy-source';
+        this.accuracyLayerId = 'accuracy-layer';
+        this.initMap();
+        this.bindEvents();
+        this.checkGeolocationSupport();
+      }
+
+      initMap(){
+        this.map = new maplibregl.Map({
+          container: 'map',
+          style: `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`,
+          center: [126.9780, 37.5665], // 서울시청
+          zoom: 13,
+          pitch: 60,
+          bearing: -20,
+          antialias: true
+        });
+
+        // 네비게이션 컨트롤
+        this.map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+        this.map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }));
+
+        this.map.on('load', () => {
+          // 지형(DEM) 소스 + Terrain 적용
+          this.map.addSource('terrain', {
+            type: 'raster-dem',
+            url: `https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=${MAPTILER_KEY}`,
+            tileSize: 256
+          });
+          this.map.setTerrain({ source: 'terrain', exaggeration: 1.2 });
+
+          // 하늘 배경
+          this.map.addLayer({
+            id: 'sky',
+            type: 'sky',
+            paint: {
+              'sky-type': 'atmosphere',
+              'sky-opacity': 1
+            }
+          });
+
+          // 3D 건물 (벡터 타일의 building 레이어 활용)
+          // MapTiler 스타일은 기본적으로 openmaptiles 소스 이름을 사용합니다.
+          this.map.addLayer({
+            id: '3d-buildings',
+            source: 'openmaptiles',
+            'source-layer': 'building',
+            type: 'fill-extrusion',
+            minzoom: 12,
+            paint: {
+              'fill-extrusion-color': ['get', 'color'],
+              'fill-extrusion-height': [
+                'case',
+                ['has', 'render_height'], ['get', 'render_height'],
+                ['has', 'height'], ['get', 'height'],
+                10
+              ],
+              'fill-extrusion-opacity': 0.9
+            }
+          }, 'waterway');
+
+          // 경로용 GeoJSON 소스/레이어
+          this.map.addSource(this.pathSourceId, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+          });
+          this.map.addLayer({
+            id: this.pathLayerId,
+            type: 'line',
+            source: this.pathSourceId,
+            paint: {
+              'line-width': 4,
+              'line-opacity': 0.8,
+              'line-color': '#FF5722'
+            }
+          });
+
+          // 정확도 원을 위한 소스/레이어
+          this.map.addSource(this.accuracySourceId, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+          });
+          this.map.addLayer({
+            id: this.accuracyLayerId,
+            type: 'fill',
+            source: this.accuracySourceId,
+            paint: {
+              'fill-color': '#2196F3',
+              'fill-opacity': 0.12
+            }
+          });
+
+          // 현재 위치 마커 (MapLibre Marker 사용)
+          this.positionMarker = new maplibregl.Marker({ color: '#2E7D32' });
+        });
+      }
+
+      bindEvents(){
+        document.getElementById('startBtn').addEventListener('click', () => this.start());
+        document.getElementById('stopBtn').addEventListener('click', () => this.stop());
+      }
+
+      checkGeolocationSupport(){
+        if(!('geolocation' in navigator)){
+          this.updateStatus('Geolocation이 지원되지 않습니다', 'inactive');
+          document.getElementById('startBtn').disabled = true;
+        }
+      }
+
+      start(){
+        if(this.isTracking) return;
+        this.updateStatus('위치 검색 중...', 'loading');
+        document.getElementById('spinner').style.display = 'inline-block';
+        const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
+        this.watchId = navigator.geolocation.watchPosition(
+          (pos) => this.onSuccess(pos),
+          (err) => this.onError(err),
+          options
+        );
+        this.isTracking = true;
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+      }
+
+      stop(){
+        if(!this.isTracking) return;
+        if(this.watchId !== null){ navigator.geolocation.clearWatch(this.watchId); this.watchId = null; }
+        this.isTracking = false;
+        this.updateStatus('추적 중지됨', 'inactive');
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
+      }
+
+      onSuccess(position){
+        const { latitude, longitude, accuracy } = position.coords;
+        const lngLat = [longitude, latitude];
+
+        // 지도 첫 진입 시 뷰 조정
+        if(this.pathCoords.length === 0){
+          this.map.jumpTo({ center: lngLat, zoom: 16, pitch: 60, bearing: -20 });
+        }
+
+        // 경로 업데이트
+        this.pathCoords.push(lngLat);
+        const pathFC = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {},
+              geometry: { type: 'LineString', coordinates: this.pathCoords }
+            }
+          ]
+        };
+        const pathSrc = this.map.getSource(this.pathSourceId);
+        if(pathSrc) pathSrc.setData(pathFC);
+
+        // 정확도 원(대략적 원 폴리곤) 업데이트
+        const circlePoly = this.circleToPolygon(lngLat, accuracy, 64);
+        const accFC = { type: 'FeatureCollection', features: [circlePoly] };
+        const accSrc = this.map.getSource(this.accuracySourceId);
+        if(accSrc) accSrc.setData(accFC);
+
+        // 현재 위치 마커 업데이트
+        if(this.positionMarker) this.positionMarker.setLngLat(lngLat).addTo(this.map);
+
+        // UI 업데이트
+        this.updateInfo(latitude, longitude, accuracy);
+        this.updateStatus('추적 중', 'active');
+        document.getElementById('spinner').style.display = 'none';
+      }
+
+      onError(error){
+        const messages = {
+          1: '위치 권한이 거부되었습니다',
+          2: '위치 정보를 사용할 수 없습니다',
+          3: '위치 검색 시간 초과'
+        };
+        this.updateStatus(messages[error.code] || '알 수 없는 오류 발생', 'inactive');
+        document.getElementById('spinner').style.display = 'none';
+        this.stop();
+      }
+
+      updateInfo(lat, lng, acc){
+        document.getElementById('latitude').textContent = lat.toFixed(6);
+        document.getElementById('longitude').textContent = lng.toFixed(6);
+        document.getElementById('accuracy').textContent = Math.round(acc) + ' m';
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+      }
+
+      updateStatus(text, type){
+        const el = document.getElementById('status');
+        const txt = document.getElementById('statusText');
+        el.className = `status ${type}`;
+        txt.textContent = text;
+      }
+
+      // 경위도( lng,lat )와 미터 단위 반경으로 원 형태의 폴리곤 생성
+      circleToPolygon(center, radiusMeters, steps = 64){
+        const [lng, lat] = center;
+        const coords = [];
+        const R = 6378137; // 지구 반경(m)
+        for(let i=0;i<=steps;i++){
+          const theta = (i / steps) * 2 * Math.PI;
+          const dx = (radiusMeters * Math.cos(theta)) / (R * Math.cos(lat * Math.PI/180));
+          const dy = (radiusMeters * Math.sin(theta)) / R;
+          const lngOffset = dx * 180 / Math.PI;
+          const latOffset = dy * 180 / Math.PI;
+          coords.push([lng + lngOffset, lat + latOffset]);
+        }
+        return {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [coords] }
+        };
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => new GPSTracker3D());
+  </script>
+</body>
+</html>
