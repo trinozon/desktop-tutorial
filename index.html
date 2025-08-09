@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPS 3D 트래커 + 지오펜스</title>
+<link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+  :root{
+    --fx-color:#FF9800; /* 기본 오렌지(진입) */
+    --fx-ringW:10px;
+    --fx-duration:1100ms;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Apple SD Gothic Neo,Apple Color Emoji,sans-serif;background:#0b1020;color:#111}
+  .topbar{
+    position:fixed;left:0;right:0;top:0;z-index:10;
+    background:rgba(255,255,255,.92);backdrop-filter:saturate(1.2) blur(8px);
+    padding:10px 12px;border-bottom:1px solid #e6e6e6;
+    display:flex;gap:8px;flex-wrap:wrap;align-items:center
+  }
+  .topbar input[type="text"], .topbar input[type="number"], .topbar select{
+    padding:8px 10px;border:1px solid #d0d0d0;border-radius:8px;min-width:120px
+  }
+  .topbar button{
+    padding:8px 12px;border:0;border-radius:20px;cursor:pointer;font-weight:600
+  }
+  .btn-primary{background:#1976d2;color:#fff}
+  .btn-secondary{background:#6c757d;color:#fff}
+  .btn-ghost{background:#fff;border:1px solid #d0d0d0}
+  .chip{padding:6px 10px;border:1px solid #d0d0d0;border-radius:16px;background:#fff;display:flex;gap:6px;align-items:center}
+  .sep{width:1px;height:26px;background:#e6e6e6;margin:0 4px}
+  #map{position:fixed;inset:56px 0 0 0}
+  .panel{
+    position:fixed;left:10px;right:10px;bottom:10px;z-index:9;
+    background:rgba(255,255,255,.92);backdrop-filter: blur(8px);
+    border-radius:14px;padding:10px 12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center
+  }
+  .kv{font-size:12px;color:#666}
+  .v{font-weight:700;color:#222}
+  /* FX overlay */
+  #fx-overlay{position:fixed;inset:56px 0 0 0;pointer-events:none}
+  #fx-ring{
+    position:absolute;inset:0;border:var(--fx-ringW) solid var(--fx-color);border-radius:8px;opacity:0;transform:scale(.98)
+  }
+  .fx-cross #fx-ring{animation:fxPulse var(--fx-duration) ease-out}
+  @keyframes fxPulse{
+    0%{opacity:.0;transform:scale(.96)}
+    10%{opacity:.9}
+    60%{opacity:.35}
+    100%{opacity:0;transform:scale(1.04)}
+  }
+  .shakeL{animation:shakeL 250ms linear}
+  .shakeM{animation:shakeM 400ms linear}
+  .shakeH{animation:shakeH 600ms linear}
+  @keyframes shakeL{ 0%,100%{transform:translate(0,0)} 25%{transform:translate(2px,0)} 50%{transform:translate(-2px,0)} 75%{transform:translate(1px,0)} }
+  @keyframes shakeM{ 0%,100%{transform:translate(0,0)} 20%{transform:translate(3px,0)} 40%{transform:translate(-3px,0)} 60%{transform:translate(2px,0)} 80%{transform:translate(-2px,0)} }
+  @keyframes shakeH{ 0%,100%{transform:translate(0,0)} 15%{transform:translate(4px,0)} 30%{transform:translate(-4px,0)} 45%{transform:translate(3px,0)} 60%{transform:translate(-3px,0)} 75%{transform:translate(2px,0)} 90%{transform:translate(-2px,0)} }
+  .badge{padding:4px 8px;border-radius:12px;font-size:11px;font-weight:700}
+  .ok{background:#e8f5e9;color:#2e7d32}
+  .warn{background:#fff8e1;color:#b26a00}
+  .err{background:#ffebee;color:#c62828}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <input id="addr" type="text" placeholder="주소 (예: 서울시청)" />
+    <input id="radius" type="number" min="10" step="10" value="150" title="반경(m)" />
+    <button class="btn-ghost" id="setZone">영역 설정</button>
+    <span class="sep"></span>
+    <label class="chip"><input id="optFollow" type="checkbox" checked> 내 위치 따라가기</label>
+    <label class="chip"><input id="optRotate" type="checkbox"> 헤딩에 맞춰 회전</label>
+    <label class="chip">강도
+      <select id="intensity">
+        <option value="L">L</option>
+        <option value="M" selected>M</option>
+        <option value="H">H</option>
+      </select>
+    </label>
+    <label class="chip"><input id="optPulse" type="checkbox" checked> 테두리 펄스</label>
+    <label class="chip"><input id="optShake" type="checkbox" checked> 흔들림</label>
+    <label class="chip"><input id="optSound" type="checkbox" checked> 사운드</label>
+    <label class="chip">볼륨 <input id="vol" type="range" min="0" max="100" value="70" style="width:120px"></label>
+    <button id="enableAudio" class="btn-secondary">🔊 사운드 활성화</button>
+    <span class="sep"></span>
+    <button class="btn-primary" id="start">추적 시작</button>
+    <button class="btn-ghost" id="stop" disabled>추적 중지</button>
+  </div>
+
+  <div id="map"></div>
+  <div id="fx-overlay"><div id="fx-ring"></div></div>
+
+  <div class="panel">
+    <span class="badge" id="status" class="ok">대기</span>
+    <span class="kv">위도 <span class="v" id="lat">--</span></span>
+    <span class="kv">경도 <span class="v" id="lng">--</span></span>
+    <span class="kv">정확도 <span class="v" id="acc">-- m</span></span>
+    <span class="kv">속도 <span class="v" id="spd">-- m/s</span></span>
+    <span class="kv">상태 <span class="v" id="zoneState">--</span></span>
+  </div>
+
+<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+<script>
+/** ====== 설정: MapTiler 키 (있으면 입력, 없으면 그대로 두세요) ====== */
+const MAPTILER_KEY = 'gpg8gRhDhCtaNPgCWYV5'; // <- 실제 키 넣으면 벡터/3D 스타일 사용
+const HAS_KEY = MAPTILER_KEY && MAPTILER_KEY !== 'gpg8gRhDhCtaNPgCWYV5';
+
+/** ====== 지도 초기화 (키 없으면 OSM 래스터 폴백) ====== */
+function createMap() {
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: HAS_KEY
+      ? `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`
+      : { version: 8, sources: {
+            osm: { type:'raster', tiles:['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize:256, attribution:'© OpenStreetMap' }
+          }, layers:[{ id:'osm', type:'raster', source:'osm' }] },
+    center: [126.9780, 37.5665],
+    zoom: 13,
+    pitch: HAS_KEY ? 60 : 0,
+    bearing: -20,
+    hash: false
+  });
+  if (HAS_KEY) map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+  else map.addControl(new maplibregl.NavigationControl(), 'top-right');
+  return map;
+}
+
+/** ====== 지오코딩 (MapTiler 키 있을 때만) ====== */
+async function geocodeAddress(q){
+  if (!HAS_KEY) throw new Error('지오코딩은 MapTiler 키가 필요합니다.');
+  const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(q)}.json?limit=1&key=${MAPTILER_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Geocoding failed: ' + res.status);
+  const j = await res.json();
+  if (!j.features?.length) throw new Error('주소를 찾지 못했습니다.');
+  const [lng, lat] = j.features[0].center;
+  return {lat, lng, label: j.features[0].place_name || q};
+}
+
+/** ====== 거리/도움 함수 ====== */
+const R = 6371000;
+function haversine(a, b){
+  const toRad = d=>d*Math.PI/180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+
+/** ====== 클래스 ====== */
+class GPSTracker3D {
+  constructor(){
+    this.map = createMap();
+    this.marker = new maplibregl.Marker({color:'#e53935'});
+    this.path = [];
+    this.geoFence = null;        // {center:{lat,lng}, radius}
+    this.inFence = null;         // null/true/false (초기 미정)
+    this.watchId = null;
+    this.audio = {ctx:null, gain:null};
+    this.lastPos = null;
+    this.lastTime = 0;
+
+    this.bindUI();
+    if (HAS_KEY) {
+      this.map.on('load', ()=>{ try { this.add3D(); } catch(e){} });
+    }
+  }
+
+  add3D(){
+    // 3D 건물 (MapTiler 스타일에 이미 포함되어 있는 경우도 있음. 중복 추가 시 무시)
+    // 여기서는 pitch만 활용. Terrain은 별도 DEM 키가 있어야 하므로 생략.
+  }
+
+  bindUI(){
+    document.getElementById('setZone').onclick = ()=>this.setZoneFromUI();
+    document.getElementById('start').onclick   = ()=>this.start();
+    document.getElementById('stop').onclick    = ()=>this.stop();
+    document.getElementById('enableAudio').onclick = ()=>this.enableAudio();
+  }
+
+  async setZoneFromUI(){
+    const addr = document.getElementById('addr').value.trim();
+    const r = parseFloat(document.getElementById('radius').value)||150;
+    try{
+      let center;
+      if (addr) {
+        const g = await geocodeAddress(addr); // 키 없으면 에러
+        center = {lat:g.lat, lng:g.lng};
+      } else if (this.lastPos){ // 주소를 비워두면 현재 위치 기준
+        center = {lat:this.lastPos.lat, lng:this.lastPos.lng};
+      } else {
+        throw new Error('주소를 입력하거나 현재 위치를 먼저 잡아주세요.');
+      }
+      this.setGeofence(center, r);
+      this.flashStatus('지오펜스 설정 완료', 'ok');
+    }catch(e){
+      this.flashStatus(e.message, 'warn');
+    }
+  }
+
+  setGeofence(center, radius){
+    this.geoFence = {center, radius};
+    // 시각화: 원을 표현하기 위해 GeoJSON circle 레이어 생성
+    const idSrc = 'fence-src', idFill='fence-fill', idLine='fence-line';
+    if (this.map.getSource(idSrc)) {
+      this.map.removeLayer(idFill); this.map.removeLayer(idLine); this.map.removeSource(idSrc);
+    }
+    const gj = this.circleGeoJSON(center, radius, 128);
+    this.map.addSource(idSrc, {type:'geojson', data:gj});
+    this.map.addLayer({ id:idFill, type:'fill', source:idSrc,
+      paint:{ 'fill-color':'#ff9800','fill-opacity':0.08 }});
+    this.map.addLayer({ id:idLine, type:'line', source:idSrc,
+      paint:{ 'line-color':'#ff9800','line-width':2,'line-opacity':0.7 }});
+    this.map.easeTo({center:[center.lng, center.lat], zoom:15, duration:600, pitch:HAS_KEY?60:0});
+  }
+
+  circleGeoJSON(center, radius, steps=64){
+    // 매우 간단한 구면 근사
+    const coords=[];
+    for (let i=0;i<=steps;i++){
+      const theta= (i/steps)*2*Math.PI;
+      const dx = (radius/R)*Math.cos(theta);
+      const dy = (radius/R)*Math.sin(theta);
+      const lat = center.lat + (dy*180/Math.PI);
+      const lng = center.lng + (dx*180/Math.PI)/Math.cos(center.lat*Math.PI/180);
+      coords.push([lng, lat]);
+    }
+    return {type:'FeatureCollection',features:[{type:'Feature',geometry:{type:'Polygon',coordinates:[coords]}}]};
+  }
+
+  start(){
+    if (this.watchId) return;
+    if (!navigator.geolocation) { this.flashStatus('이 브라우저는 위치를 지원하지 않습니다','err'); return; }
+    const opt={ enableHighAccuracy:true, timeout:10000, maximumAge:0 };
+    this.watchId = navigator.geolocation.watchPosition(
+      p=>this.onPos(p),
+      e=>this.onErr(e),
+      opt
+    );
+    document.getElementById('start').disabled=true;
+    document.getElementById('stop').disabled=false;
+    this.flashStatus('위치 추적 시작','ok');
+  }
+
+  stop(){
+    if (this.watchId){ navigator.geolocation.clearWatch(this.watchId); this.watchId=null; }
+    document.getElementById('start').disabled=false;
+    document.getElementById('stop').disabled=true;
+    this.flashStatus('추적 중지','warn');
+  }
+
+  onErr(err){
+    const m = (err.code===1)?'위치 권한이 거부됨':(err.code===2)?'위치 불가':(err.code===3)?'시간초과':'알 수 없는 오류';
+    this.flashStatus(m,'err');
+  }
+
+  enableAudio(){
+    try{
+      if (this.audio.ctx) { this.flashStatus('사운드 준비 완료','ok'); return; }
+      const ctx = new (window.AudioContext||window.webkitAudioContext)();
+      const gain = ctx.createGain(); gain.connect(ctx.destination);
+      gain.gain.value = (document.getElementById('vol').value|0)/100;
+      this.audio = {ctx,gain};
+      if (ctx.state==='suspended') ctx.resume();
+      this.flashStatus('사운드 준비 완료','ok');
+    }catch(e){ this.flashStatus('오디오 초기화 실패','err'); }
+  }
+
+  playSound(inside){
+    if (!document.getElementById('optSound').checked) return;
+    if (!this.audio.ctx) return; // enableAudio 필요
+    const {ctx} = this.audio;
+    const v = (document.getElementById('vol').value|0)/100;
+
+    // 사운드: 진입(밝고 길게), 이탈(차분하고 짧게)
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    g.gain.value = 0.0001;
+    o.connect(g); g.connect(this.audio.gain);
+
+    if (inside){
+      // 진입: 오렌지 — 밝고 길게
+      o.type='triangle';
+      o.frequency.setValueAtTime(1046, ctx.currentTime); // C6
+      g.gain.exponentialRampToValueAtTime(0.45*v, ctx.currentTime + 0.25);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.9);
+      o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.92);
+    }else{
+      // 이탈: 연청 — 낮고 짧게
+      o.type='square';
+      o.frequency.setValueAtTime(392, ctx.currentTime); // G4
+      g.gain.exponentialRampToValueAtTime(0.35*v, ctx.currentTime + 0.15);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+      o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.47);
+    }
+  }
+
+  playFX(inside){
+    const fx = document.getElementById('fx-overlay');
+    const ring = document.getElementById('fx-ring');
+    const usePulse = document.getElementById('optPulse').checked;
+    const useShake = document.getElementById('optShake').checked;
+    const level = document.getElementById('intensity').value;
+    const color = inside ? '#FF9800' : '#ADD8E6';
+
+    document.documentElement.style.setProperty('--fx-color', color);
+    const ringW = level==='L'?'6px':level==='H'?'12px':'9px';
+    const duration = level==='L'?800:level==='H'?1400:1100;
+    document.documentElement.style.setProperty('--fx-ringW', ringW);
+    document.documentElement.style.setProperty('--fx-duration', duration+'ms');
+
+    fx.classList.remove('fx-cross');
+    ring.classList.remove('shakeL','shakeM','shakeH');
+    void fx.offsetWidth; // reflow
+
+    if (usePulse) fx.classList.add('fx-cross');
+    if (useShake) ring.classList.add(level==='L'?'shakeL':level==='H'?'shakeH':'shakeM');
+
+    this.playSound(inside);
+    document.getElementById('zoneState').textContent = inside?'진입(오렌지)':'이탈(연청색)';
+  }
+
+  onPos(p){
+    const c = p.coords;
+    const now = p.timestamp||Date.now();
+    const cur = {lat:c.latitude, lng:c.longitude};
+    const spd = (typeof c.speed==='number' && c.speed>=0) ? c.speed : this.estimateSpeed(this.lastPos, this.lastTime, cur, now);
+    const hdg = (typeof c.heading==='number' && !Number.isNaN(c.heading)) ? c.heading : null;
+
+    this.lastPos = cur; this.lastTime = now;
+
+    // 마커 & 경로
+    this.marker.setLngLat([cur.lng,cur.lat]).addTo(this.map);
+    this.path.push([cur.lng,cur.lat]);
+    this.updatePath();
+
+    // 정보 UI
+    document.getElementById('lat').textContent = cur.lat.toFixed(6);
+    document.getElementById('lng').textContent = cur.lng.toFixed(6);
+    document.getElementById('acc').textContent = Math.round(c.accuracy||0)+' m';
+    document.getElementById('spd').textContent = (spd?spd.toFixed(2):'0')+' m/s';
+    this.setStatus('추적 중','ok');
+
+    // 카메라: 속도 기반 동적 줌 & 부드러운 이동
+    const follow = document.getElementById('optFollow').checked;
+    const rotate = document.getElementById('optRotate').checked;
+    if (follow){
+      // 빠를수록 조금 줌 아웃 (자연스러운 내비 느낌)
+      const z = clamp(19 - clamp((spd||0)/5, 0, 2), 16, 19); // 0m/s→19, 10m/s→17
+      const brg = rotate && hdg!=null ? hdg : this.map.getBearing();
+      this.map.easeTo({
+        center:[cur.lng,cur.lat],
+        zoom:z,
+        pitch: HAS_KEY ? 70 : 0,
+        bearing: brg,
+        duration: 600,
+        easing: t => t*(2-t)   // 부드러운 easeInOut
+      });
+    }
+
+    // 지오펜스 판정
+    this.checkFence(cur);
+  }
+
+  estimateSpeed(prevPos, prevTime, curPos, curTime){
+    if (!prevPos || !prevTime) return 0;
+    const dt = (curTime - prevTime)/1000; if (dt<=0) return 0;
+    const d = haversine({lat:prevPos.lat,lng:prevPos.lng},{lat:curPos.lat,lng:curPos.lng});
+    return d/dt;
+  }
+
+  updatePath(){
+    const id='path-src', idLine='path-line';
+    if (!this.map.getSource(id)){
+      this.map.addSource(id, {type:'geojson', data:{type:'FeatureCollection',features:[]}});
+      this.map.addLayer({id:idLine,type:'line',source:id,paint:{'line-color':'#FF5722','line-width':3,'line-opacity':0.75}});
+    }
+    const src=this.map.getSource(id);
+    const gj={type:'FeatureCollection',features:[{type:'Feature',geometry:{type:'LineString',coordinates:this.path}}]};
+    src.setData(gj);
+  }
+
+  checkFence(cur){
+    if (!this.geoFence) return;
+    const d = haversine({lat:cur.lat,lng:cur.lng}, this.geoFence.center);
+    const insideNow = d <= this.geoFence.radius;
+    // 히스테리시스(경계 튕김 방지): 2.5% 버퍼
+    const buf = this.geoFence.radius * 0.025;
+    if (this.inFence===null){
+      this.inFence = insideNow;
+      document.getElementById('zoneState').textContent = insideNow?'영역 내':'영역 밖';
+      return;
+    }
+    if (this.inFence && d > this.geoFence.radius + buf){
+      this.inFence = false;
+      this.playFX(false); // 이탈(연청)
+    } else if (!this.inFence && d < this.geoFence.radius - buf){
+      this.inFence = true;
+      this.playFX(true);  // 진입(오렌지)
+    }
+  }
+
+  setStatus(text, kind){ // kind: ok|warn|err
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className='badge ' + (kind||'ok');
+  }
+  flashStatus(text, kind){ this.setStatus(text, kind); }
+}
+
+const app = new GPSTracker3D();
+
+/** ====== 간단 테스트 (콘솔에서 결과 확인) ====== */
+(function tests(){
+  // 1) 거리 함수
+  console.assert(Math.abs(haversine({lat:0,lng:0},{lat:0,lng:1})-111319)<200, '거리 테스트(경도 1도)');
+
+  // 2) 지오펜스 포함/배제
+  const center={lat:37,lng:127}, r=200;
+  const near={lat:37.001,lng:127};   // 약 111m 북쪽
+  const far ={lat:37.003,lng:127};   // 약 333m 북쪽
+  console.assert(haversine(center,near) < r, '지오펜스 in');
+  console.assert(haversine(center,far)  > r, '지오펜스 out');
+
+  // 3) 이징 단조 증가
+  const ease = t=>t*(2-t);
+  let prev=-1; for (let i=0;i<=10;i++){ const v=ease(i/10); console.assert(v>=prev,'easing 단조성'); prev=v; }
+  console.log('%cTests OK','color:green;font-weight:700');
+})();
+</script>
+</body>
+</html>
